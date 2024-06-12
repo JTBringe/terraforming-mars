@@ -29,7 +29,7 @@ import {SelectPaymentDeferred} from './deferredActions/SelectPaymentDeferred';
 import {SelectProjectCardToPlay} from './inputs/SelectProjectCardToPlay';
 import {SelectOption} from './inputs/SelectOption';
 import {SelectSpace} from './inputs/SelectSpace';
-import {RobotCard, SelfReplicatingRobots} from './cards/promo/SelfReplicatingRobots';
+import {SelfReplicatingRobots} from './cards/promo/SelfReplicatingRobots';
 import {SerializedCard} from './SerializedCard';
 import {SerializedPlayer} from './SerializedPlayer';
 import {StormCraftIncorporated} from './cards/colonies/StormCraftIncorporated';
@@ -43,13 +43,12 @@ import {MoonExpansion} from './moon/MoonExpansion';
 import {IStandardProjectCard} from './cards/IStandardProjectCard';
 import {ConvertPlants} from './cards/base/standardActions/ConvertPlants';
 import {ConvertHeat} from './cards/base/standardActions/ConvertHeat';
-import {LunaProjectOffice} from './cards/moon/LunaProjectOffice';
 import {GlobalParameter} from '../common/GlobalParameter';
 import {LogHelper} from './LogHelper';
 import {UndoActionOption} from './inputs/UndoActionOption';
 import {Turmoil} from './turmoil/Turmoil';
 import {PathfindersExpansion} from './pathfinders/PathfindersExpansion';
-import {deserializeProjectCard, serializeProjectCard} from './cards/CardSerialization';
+import {deserializeProjectCard, serializeProjectCard} from './cards/cardSerialization';
 import {ColoniesHandler} from './colonies/ColoniesHandler';
 import {MonsInsurance} from './cards/promo/MonsInsurance';
 import {InputResponse} from '../common/inputs/InputResponse';
@@ -69,15 +68,18 @@ import {PlayableCard} from './cards/IProjectCard';
 import {Supercapacitors} from './cards/promo/Supercapacitors';
 import {CanAffordOptions, CardAction, IPlayer, ResourceSource, isIPlayer} from './IPlayer';
 import {IPreludeCard} from './cards/prelude/IPreludeCard';
-import {inplaceRemove, sum} from '../common/utils/utils';
+import {copyAndClear, inplaceRemove, sum} from '../common/utils/utils';
 import {PreludesExpansion} from './preludes/PreludesExpansion';
 import {ChooseCards} from './deferredActions/ChooseCards';
 import {UnderworldPlayerData} from './underworld/UnderworldData';
 import {UnderworldExpansion} from './underworld/UnderworldExpansion';
 import {Counter} from './behavior/Counter';
 import {TRSource} from '../common/cards/TRSource';
+import {IParty} from './turmoil/parties/IParty';
+import {AlliedParty} from './turmoil/AlliedParty';
+import {newStandardDraft} from './Draft';
 
-const THROW_WAITING_FOR = Boolean(process.env.THROW_WAITING_FOR);
+const THROW_STATE_ERRORS = Boolean(process.env.THROW_STATE_ERRORS);
 
 export class Player implements IPlayer {
   public readonly id: PlayerId;
@@ -88,6 +90,7 @@ export class Player implements IPlayer {
   public colonies: Colonies;
   public readonly production: Production;
   public readonly stock: Stock;
+  private _alliedParty: AlliedParty | undefined;
 
   // Corporate identity
   public corporations: Array<ICorporationCard> = [];
@@ -122,6 +125,10 @@ export class Player implements IPlayer {
     return this.stock.heat;
   }
 
+  public get alliedParty(): AlliedParty | undefined {
+    return this._alliedParty;
+  }
+
   public set megaCredits(megacredits: number) {
     this.stock.megacredits = megacredits;
   }
@@ -144,6 +151,19 @@ export class Player implements IPlayer {
 
   public set heat(heat: number) {
     this.stock.heat = heat;
+  }
+
+  public setAlliedParty(p: IParty) {
+    this._alliedParty = {
+      partyName: p.name,
+      agenda: {
+        bonusId: p.bonuses[0].id,
+        policyId: p.policies[0].id,
+      },
+    };
+    const alliedPolicy = this.game.turmoil?.getPartyByName(p.name).policies.find((t) => t.id === p.policies[0].id);
+
+    alliedPolicy?.onPolicyStartForPlayer?.(this);
   }
 
   // Resource values
@@ -174,11 +194,12 @@ export class Player implements IPlayer {
   public ceoCardsInHand: Array<IProjectCard> = [];
   public playedCards: Array<IProjectCard> = [];
   public draftedCards: Array<IProjectCard> = [];
-  public draftedCorporations: Array<ICorporationCard> = [];
+  public draftHand: Array<IProjectCard> = [];
   public cardCost: number = constants.CARD_COST;
   public needsToDraft?: boolean;
 
   public timer: Timer = Timer.newInstance();
+  public autopass = false;
 
   // Turmoil
   public turmoilPolicyActionUsed: boolean = false;
@@ -283,8 +304,12 @@ export class Player implements IPlayer {
     }
   }
 
-  public getSelfReplicatingRobotsTargetCards(): Array<RobotCard> {
-    return (<SelfReplicatingRobots> this.playedCards.find((card) => card instanceof SelfReplicatingRobots))?.targetCards ?? [];
+  public getSelfReplicatingRobotsTargetCards(): Array<IProjectCard> {
+    const selfReplicatingRobots = this.playedCards.find((card) => card instanceof SelfReplicatingRobots);
+    if (selfReplicatingRobots instanceof SelfReplicatingRobots) {
+      return selfReplicatingRobots.targetCards;
+    }
+    return [];
   }
 
   public getSteelValue(): number {
@@ -706,61 +731,6 @@ export class Player implements IPlayer {
     });
   }
 
-  public dealForDraft(quantity: number, cards: Array<IProjectCard>): void {
-    cards.push(...this.game.projectDeck.drawN(this.game, quantity, 'bottom'));
-  }
-
-  /**
-   * Ask the player to draft from a set of cards.
-   *
-   * @param initialDraft when true, this is part of the first generation draft.
-   * @param passTo  The player _this_ player passes remaining cards to.
-   * @param passedCards The cards received from the draw, or from the prior player. If empty, it's the first
-   *   step in the draft, and cards have to be dealt.
-   */
-  public askPlayerToDraft(initialDraft: boolean, passTo: IPlayer, passedCards?: Array<IProjectCard>): void {
-    let cardsToDraw = 4;
-    let cardsToKeep = 1;
-
-    let cards: Array<IProjectCard> = [];
-    if (passedCards === undefined) {
-      if (initialDraft) {
-        cardsToDraw = 5;
-      } else {
-        if (LunaProjectOffice.isActive(this)) {
-          cardsToDraw = 5;
-          cardsToKeep = 2;
-        }
-        if (this.isCorporation(CardName.MARS_MATHS)) {
-          cardsToDraw = 5;
-          cardsToKeep = 2;
-        }
-      }
-      this.dealForDraft(cardsToDraw, cards);
-    } else {
-      cards = passedCards;
-    }
-
-    const messageTitle = cardsToKeep === 1 ?
-      'Select a card to keep and pass the rest to ${0}' :
-      'Select two cards to keep and pass the rest to ${0}';
-    this.setWaitingFor(
-      new SelectCard(
-        message(messageTitle, (b) => b.player(passTo)),
-        'Keep',
-        cards,
-        {min: cardsToKeep, max: cardsToKeep, played: false})
-        .andThen((selected) => {
-          selected.forEach((card) => {
-            this.draftedCards.push(card);
-            cards = cards.filter((c) => c !== card);
-          });
-          this.game.playerIsFinishedWithDraftingPhase(initialDraft, this, cards);
-          return undefined;
-        }),
-    );
-  }
-
   /**
    * @return {number} the number of avaialble megacredits. Which is just a shorthand for megacredits,
    * plus any units of heat available thanks to Helion (and Stormcraft, by proxy).
@@ -772,30 +742,20 @@ export class Player implements IPlayer {
     return total;
   }
 
-  public runResearchPhase(draftVariant: boolean): void {
-    let dealtCards: Array<IProjectCard> = [];
-    if (draftVariant) {
-      dealtCards = this.draftedCards;
-      this.draftedCards = [];
-    } else {
-      let cardsToDraw = 4;
-      if (this.isCorporation(CardName.MARS_MATHS)) {
-        cardsToDraw = 5;
-      }
-      if (LunaProjectOffice.isActive(this)) {
-        cardsToDraw = 5;
-      }
-      this.dealForDraft(cardsToDraw, dealtCards);
+  public runResearchPhase(): void {
+    if (!this.game.gameOptions.draftVariant || this.game.isSoloMode()) {
+      this.draftedCards = newStandardDraft(this.game).draw(this);
     }
 
-    let cardsToKeep = 4;
-    if (LunaProjectOffice.isActive(this)) {
-      // If Luna Project is active, they get to keep the 5 cards they drafted
-      cardsToKeep = 5;
+    let selectable = this.draftedCards.length;
+    if (this.isCorporation(CardName.MARS_MATHS) && !this.isCorporation(CardName.LUNA_PROJECT_OFFICE)) {
+      selectable--;
     }
 
     // TODO(kberg): Using .execute to rely on directly calling setWaitingFor is not great.
-    const action = new ChooseCards(this, dealtCards, {paying: true, keepMax: cardsToKeep}).execute();
+    // It's because each player is drafting at the same time. Once again, the server isn't ideal
+    // when it comes to handling multiple players at once.
+    const action = new ChooseCards(this, copyAndClear(this.draftedCards), {paying: true, keepMax: selectable}).execute();
     this.setWaitingFor(action, () => this.game.playerIsFinishedWithResearchPhase(this));
   }
 
@@ -943,6 +903,17 @@ export class Player implements IPlayer {
     }
 
     // Play the card
+    //
+    // IMPORTANT: This is the wrong place to take the play card action.
+    // It should be played after putting the card into the playedCards array.
+    // That makes sense because every card that has an "including this" behavior is
+    // actually hacked to +1 things. That's too bad. It means all our code and tests are
+    // a little busted.
+    //
+    // This issue is evident when playing New Partner, and drawing Double Down.
+    // The issue is fixed in Double Down for the time being. But the right fix is to move this block
+    // down. As I say, that's going to break a lot of things, many of which are not evident
+    // in tests (because they use card.play instad of player.playCard).
     const action = selectedCard.play(this);
     this.defer(action, Priority.DEFAULT);
 
@@ -957,14 +928,10 @@ export class Player implements IPlayer {
         this.preludeCardsInHand.splice(preludeCardIndex, 1);
       }
 
-      // Remove card from Self Replicating Robots
-      const card = this.playedCards.find((card) => card.name === CardName.SELF_REPLICATING_ROBOTS);
-      if (card instanceof SelfReplicatingRobots) {
-        for (const targetCard of card.targetCards) {
-          if (targetCard.card.name === selectedCard.name) {
-            const index = card.targetCards.indexOf(targetCard);
-            card.targetCards.splice(index, 1);
-          }
+      const selfReplicatingRobots = this.playedCards.find((card) => card.name === CardName.SELF_REPLICATING_ROBOTS);
+      if (selfReplicatingRobots instanceof SelfReplicatingRobots) {
+        if (inplaceRemove(selfReplicatingRobots.targetCards, selectedCard)) {
+          selectedCard.resourceCount = 0;
         }
       }
     }
@@ -986,6 +953,8 @@ export class Player implements IPlayer {
     case 'action-only':
       break;
     }
+
+    // See comment above regarding
 
     // See DeclareCloneTag for why this skips cards with clone tags.
     if (!selectedCard.tags.includes(Tag.CLONE) && cardAction !== 'action-only') {
@@ -1240,6 +1209,7 @@ export class Player implements IPlayer {
   public pass(): void {
     this.game.playerHasPassed(this);
     this.lastCardPlayed = undefined;
+    this.autopass = false;
     this.game.log('${0} passed', (b) => b.player(this));
   }
 
@@ -1308,9 +1278,7 @@ export class Player implements IPlayer {
     // Self Replicating robots check
     const card = this.playedCards.find((card) => card.name === CardName.SELF_REPLICATING_ROBOTS);
     if (card instanceof SelfReplicatingRobots) {
-      for (const targetCard of card.targetCards) {
-        candidateCards.push(targetCard.card);
-      }
+      candidateCards.push(...card.targetCards);
     }
 
     const playableCards: Array<PlayableCard> = [];
@@ -1510,10 +1478,14 @@ export class Player implements IPlayer {
           return gameOptions.altVenusBoard === false;
         case CardName.AIR_SCRAPPING_STANDARD_PROJECT_VARIANT:
           return gameOptions.altVenusBoard === true;
-        case CardName.MOON_HABITAT_STANDARD_PROJECT_V2:
-        case CardName.MOON_MINE_STANDARD_PROJECT_V2:
-        case CardName.MOON_ROAD_STANDARD_PROJECT_V2:
+        case CardName.MOON_HABITAT_STANDARD_PROJECT_VARIANT_2:
+        case CardName.MOON_MINE_STANDARD_PROJECT_VARIANT_2:
+        case CardName.MOON_ROAD_STANDARD_PROJECT_VARIANT_2:
           return gameOptions.moonStandardProjectVariant === true;
+        case CardName.MOON_HABITAT_STANDARD_PROJECT_VARIANT_1:
+        case CardName.MOON_MINE_STANDARD_PROJECT_VARIANT_1:
+        case CardName.MOON_ROAD_STANDARD_PROJECT_VARIANT_1:
+          return gameOptions.moonStandardProjectVariant1 === true;
         case CardName.EXCAVATE_STANDARD_PROJECT:
           return gameOptions.underworldExpansion === true;
         case CardName.COLLUSION_STANDARD_PROJECT:
@@ -1566,6 +1538,9 @@ export class Player implements IPlayer {
     if (this.actionsTakenThisRound === 0 || game.gameOptions.undoOption) game.save();
     // if (saveBeforeTakingAction) game.save();
 
+    if (this.autopass) {
+      this.passOption().cb();
+    }
     const headStartIsInEffect = this.headStartIsInEffect();
 
     if (!headStartIsInEffect) {
@@ -1815,8 +1790,8 @@ export class Player implements IPlayer {
 
   public setWaitingFor(input: PlayerInput, cb: () => void = () => {}): void {
     if (this.waitingFor !== undefined) {
-      const message = 'Overwriting a waitingFor: ' + this.waitingFor.type;
-      if (THROW_WAITING_FOR) {
+      const message = `Overwriting waitingFor ${this.waitingFor.type} with ${input?.type}`;
+      if (THROW_STATE_ERRORS) {
         throw new Error(message);
       } else {
         console.warn(message);
@@ -1933,6 +1908,9 @@ export class Player implements IPlayer {
       victoryPointsByGeneration: this.victoryPointsByGeneration,
       totalDelegatesPlaced: this.totalDelegatesPlaced,
       underworldData: this.underworldData,
+      alliedParty: this._alliedParty,
+      draftHand: this.draftHand.map((c) => c.name),
+      autoPass: this.autopass,
     };
 
     if (this.lastCardPlayed !== undefined) {
@@ -1949,6 +1927,7 @@ export class Player implements IPlayer {
     player.canUseHeatAsMegaCredits = d.canUseHeatAsMegaCredits;
     player.canUsePlantsAsMegacredits = d.canUsePlantsAsMegaCredits;
     player.canUseTitaniumAsMegacredits = d.canUseTitaniumAsMegacredits;
+    player.canUseCorruptionAsMegacredits = d.canUseCorruptionAsMegacredits;
     player.cardCost = d.cardCost;
     player.colonies.cardDiscount = d.cardDiscount;
     player.colonies.tradeDiscount = d.colonyTradeDiscount;
@@ -2025,12 +2004,18 @@ export class Player implements IPlayer {
     player.ceoCardsInHand = ceosFromJSON(d.ceoCardsInHand);
     player.playedCards = d.playedCards.map((element: SerializedCard) => deserializeProjectCard(element));
     player.draftedCards = cardsFromJSON(d.draftedCards);
+    player.autopass = d.autoPass ?? false;
 
     player.timer = Timer.deserialize(d.timer);
 
     if (d.underworldData !== undefined) {
       player.underworldData = d.underworldData;
     }
+    if (d.alliedParty !== undefined) {
+      player._alliedParty = d.alliedParty;
+    }
+
+    player.draftHand = cardsFromJSON(d.draftHand);
 
     return player;
   }

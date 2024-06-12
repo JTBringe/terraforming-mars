@@ -98,9 +98,14 @@
                                   <span v-i18n>Mandatory Moon Terraforming</span>
                               </label>
 
-                              <input type="checkbox" v-model="moonStandardProjectVariant" id="moonStandardProjectVariant-checkbox">
-                              <label for="moonStandardProjectVariant-checkbox">
-                                  <span v-i18n>Standard Project Variant</span>&nbsp;<a href="https://github.com/terraforming-mars/terraforming-mars/wiki/Variants#moon-standard-project-variant" class="tooltip" target="_blank">&#9432;</a>
+                              <input type="checkbox" v-model="moonStandardProjectVariant" id="moonStandardProjectVariant2-checkbox">
+                              <label for="moonStandardProjectVariant2-checkbox">
+                                  <span v-i18n>Standard Project Variant #2</span>&nbsp;<a href="https://github.com/terraforming-mars/terraforming-mars/wiki/Variants#moon-standard-project-variant" class="tooltip" target="_blank">&#9432;</a>
+                              </label>
+
+                              <input type="checkbox" v-model="moonStandardProjectVariant1" id="moonStandardProjectVariant1-checkbox">
+                              <label for="moonStandardProjectVariant1-checkbox">
+                                  <span v-i18n>Standard Project Variant #1</span>&nbsp;<a href="https://github.com/terraforming-mars/terraforming-mars/wiki/Variants#moon-standard-project-variant" class="tooltip" target="_blank">&#9432;</a>
                               </label>
                             </template>
 
@@ -156,7 +161,7 @@
                             <input type="checkbox" name="ceo" id="underworld-checkbox" v-model="underworldExpansion">
                             <label for="underworld-checkbox" class="expansion-button">
                                 <div class="create-game-expansion-icon expansion-icon-underworld"></div>
-                                <span v-i18n>Underworld (β)</span><span> 🆕</span>&nbsp;<a href="https://github.com/terraforming-mars/terraforming-mars/wiki/Underworld" class="tooltip" target="_blank">&#9432;</a>
+                                <span v-i18n>Underworld</span><span> 🆕</span>&nbsp;<a href="https://github.com/terraforming-mars/terraforming-mars/wiki/Underworld" class="tooltip" target="_blank">&#9432;</a>
                             </label>
                         </div>
 
@@ -196,7 +201,7 @@
 
                             <input type="checkbox" v-model="solarPhaseOption" id="WGT-checkbox">
                             <label for="WGT-checkbox">
-                                <span v-i18n>World Government Terraforming</span>&nbsp;<a href="https://github.com/terraforming-mars/terraforming-mars/wiki/Variants#solar-phase" class="tooltip" target="_blank">&#9432;</a>
+                                <span v-i18n>World Government Terraforming</span>&nbsp;<a href="https://github.com/terraforming-mars/terraforming-mars/wiki/Variants#world-government-terraforming" class="tooltip" target="_blank">&#9432;</a>
                             </label>
 
                             <template v-if="playersCount === 1">
@@ -324,6 +329,13 @@
                                 <input type="checkbox" name="initialDraft" v-model="initialDraft" id="initialDraft-checkbox">
                                 <label for="initialDraft-checkbox">
                                     <span v-i18n>Initial Draft variant</span>&nbsp;<a href="https://github.com/terraforming-mars/terraforming-mars/wiki/Variants#initial-draft" class="tooltip" target="_blank">&#9432;</a>
+                                </label>
+                                </div>
+
+                                <div v-if="initialDraft && prelude">
+                                <input type="checkbox" name="preludeDraft" v-model="preludeDraftVariant" id="preludeDraft-checkbox">
+                                <label for="preludeDraft-checkbox">
+                                    <span v-i18n>Prelude Draft variant</span>&nbsp;<a href="https://github.com/terraforming-mars/terraforming-mars/wiki/Variants#initial-draft" class="tooltip" target="_blank">&#9432;</a>
                                 </label>
                                 </div>
                             </div>
@@ -540,11 +552,15 @@ type Refs = {
   file: HTMLInputElement,
 }
 
+type FormModel = {
+  preludeToggled: boolean;
+  uploading: boolean;
+};
+
 export default (Vue as WithRefs<Refs>).extend({
   name: 'CreateGameForm',
-  data(): CreateGameModel & {constants: typeof constants} {
+  data(): CreateGameModel & FormModel {
     return {
-      constants,
       firstIndex: 1,
       playersCount: 1,
       players: [
@@ -617,6 +633,7 @@ export default (Vue as WithRefs<Refs>).extend({
       requiresVenusTrackCompletion: false,
       requiresMoonTrackCompletion: false,
       moonStandardProjectVariant: false,
+      moonStandardProjectVariant1: false,
       altVenusBoard: false,
       escapeVelocityMode: false,
       escapeVelocityThreshold: constants.DEFAULT_ESCAPE_VELOCITY_THRESHOLD,
@@ -629,6 +646,10 @@ export default (Vue as WithRefs<Refs>).extend({
       startingCeos: 3,
       starWarsExpansion: false,
       underworldExpansion: false,
+      preludeDraftVariant: undefined,
+
+      preludeToggled: false,
+      uploading: false,
     };
   },
   components: {
@@ -657,6 +678,22 @@ export default (Vue as WithRefs<Refs>).extend({
         this.politicalAgendasExtension = AgendaStyle.STANDARD;
       }
     },
+    initialDraft(value: boolean) {
+      if (value === true && this.preludeDraftVariant === undefined) {
+        this.preludeDraftVariant = true;
+      }
+    },
+    prelude(value: boolean) {
+      if (value === true && this.preludeDraftVariant === undefined) {
+        this.preludeDraftVariant = true;
+      }
+    },
+    prelude2Expansion(value: boolean) {
+      if (value === true && this.preludeToggled === false && this.uploading === false) {
+        this.prelude = true;
+        this.preludeToggled = true;
+      }
+    },
     playersCount(value: number) {
       if (value === 1) {
         this.corporateEra = true;
@@ -669,6 +706,9 @@ export default (Vue as WithRefs<Refs>).extend({
     },
     RandomMAOptionType(): typeof RandomMAOptionType {
       return RandomMAOptionType;
+    },
+    constants(): typeof constants {
+      return constants;
     },
   },
   methods: {
@@ -689,11 +729,12 @@ export default (Vue as WithRefs<Refs>).extend({
       const reader = new FileReader();
       const component: CreateGameModel = this;
 
-      reader.addEventListener('load', function() {
+      reader.addEventListener('load', () => {
         const warnings = [];
         try {
           const readerResults = reader.result;
           if (typeof(readerResults) === 'string') {
+            this.uploading = true;
             const results = JSON.parse(readerResults);
 
             const players = results['players'];
@@ -758,6 +799,7 @@ export default (Vue as WithRefs<Refs>).extend({
                 if (!component.seededGame) component.seed = Math.random();
                 // set to alter after any watched properties
                 component.solarPhaseOption = Boolean(capturedSolarPhaseOption);
+                this.uploading = false;
               } catch (e) {
                 window.alert('Error reading JSON ' + e);
               }
@@ -856,6 +898,7 @@ export default (Vue as WithRefs<Refs>).extend({
       if (this.moonExpansion === false) {
         this.requiresMoonTrackCompletion = false;
         this.moonStandardProjectVariant = false;
+        this.moonStandardProjectVariant1 = false;
       }
     },
     getBoardColorClass(boardName: BoardName | BoardNameType): string {
@@ -1171,6 +1214,7 @@ export default (Vue as WithRefs<Refs>).extend({
         soloTR,
         clonedGamedId,
         initialDraft,
+        preludeDraftVariant: this.preludeDraftVariant ?? false,
         randomMA,
         shuffleMapOption,
         // beginnerOption,
@@ -1178,6 +1222,7 @@ export default (Vue as WithRefs<Refs>).extend({
         requiresVenusTrackCompletion,
         requiresMoonTrackCompletion: this.requiresMoonTrackCompletion,
         moonStandardProjectVariant: this.moonStandardProjectVariant,
+        moonStandardProjectVariant1: this.moonStandardProjectVariant1,
         altVenusBoard: this.altVenusBoard,
         escapeVelocityMode,
         escapeVelocityThreshold,
